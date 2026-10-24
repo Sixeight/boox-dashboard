@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep the Boox Palma showing the dashboard
+After=boox-dashboard.service
+Wants=boox-dashboard.service
+
+[Service]
+ExecStart=%h/local/src/github.com/sixeight/boox-dashboard/scripts/palma-keeper.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

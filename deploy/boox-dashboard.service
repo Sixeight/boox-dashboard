@@ -1,0 +1,14 @@
+[Unit]
+Description=Boox dashboard server
+
+[Service]
+WorkingDirectory=%h/local/src/github.com/sixeight/boox-dashboard
+EnvironmentFile=%h/local/src/github.com/sixeight/boox-dashboard/.env
+# Agent sessions are read from here; systemd does not inherit the shell's CLAUDE_CONFIG_DIR.
+Environment=CLAUDE_CONFIG_DIR=%h/.config/claude
+ExecStart=%h/local/src/github.com/sixeight/boox-dashboard/bin/boox-dashboard -addr 127.0.0.1:8080 -web %h/local/src/github.com/sixeight/boox-dashboard/web
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

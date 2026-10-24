@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<style>
+  /* E-ink: pure black on white, no animation, no gray fills. */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #fff; color: #000; }
+  body {
+    font-family: "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+  }
+  .clock { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+  .date { font-size: 22px; font-weight: 700; }
+  .time { font-size: 72px; font-weight: 700; line-height: 1; letter-spacing: -2px; }
+  hr { border: 0; border-top: 3px solid #000; margin: 8px 0; }
+  .now { display: flex; align-items: baseline; justify-content: space-between; }
+  .now .label { font-size: 28px; font-weight: 700; }
+  .now .temp { font-size: 44px; font-weight: 700; }
+  .days { display: grid; grid-template-columns: 1fr 1fr 1fr; border-top: 1px solid #000; border-bottom: 1px solid #000; margin-top: 4px; }
+  .day { padding: 4px 6px; font-size: 16px; line-height: 1.35; }
+  .day + .day { border-left: 1px solid #000; }
+  .day .name { font-weight: 700; }
+  .day .nums { white-space: nowrap; }
+  .section { margin-top: 16px; font-size: 16px; font-weight: 700; }
+  #room { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; }
+  .sensor { padding: 3px 0; border-bottom: 1px solid #000; min-width: 0; }
+  .sensor .name { font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .sensor .values { font-size: 18px; font-weight: 700; white-space: nowrap; }
+  .sensor .co2 { font-size: 14px; font-weight: 400; }
+  .stat { display: flex; align-items: center; padding: 4px 0; font-size: 18px; }
+  .stat .name { width: 4.5em; font-weight: 700; }
+  .stat .bar { flex: 1; height: 14px; border: 2px solid #000; margin-right: 12px; }
+  .stat .fill { height: 100%; background: #000; }
+  .stat .value { text-align: right; min-width: 7.5em; }
+  .agent { padding: 4px 0; border-bottom: 1px solid #000; }
+  .agent .row { display: flex; align-items: baseline; font-size: 17px; }
+  .agent .mark { width: 1.4em; flex-shrink: 0; }
+  .agent .name, .agent .detail { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .agent.waiting .name { font-weight: 700; }
+  .agent .tag { background: #000; color: #fff; font-size: 13px; font-weight: 700; padding: 0 4px; margin-right: 6px; }
+  .agent.none { font-size: 17px; padding: 8px 0; border-bottom: 0; }
+  .agent .since { text-align: right; min-width: 4.5em; }
+  .agent .detail { font-size: 14px; padding-left: 1.7em; }
+  .footer { margin-top: auto; font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="clock">
+    <div class="time" id="time"></div>
+    <div class="date" id="date"></div>
+  </div>
+  <hr>
+  <div class="now"><span class="label" id="now-label">—</span><span class="temp" id="now-temp"></span></div>
+  <div class="days" id="days"></div>
+  <div id="room-section" style="display:none">
+    <div class="section">部屋</div>
+    <hr>
+    <div id="room"></div>
+  </div>
+  <div class="section" id="pc-title">PC</div>
+  <hr>
+  <div id="pc"></div>
+  <div class="section" id="agents-title">Agents</div>
+  <hr>
+  <div id="agents"></div>
+  <div class="footer" id="footer"></div>
+<script>
+  // No devtools on the device: surface script errors on screen.
+  window.onerror = function (message, source, line) {
+    document.getElementById("footer").textContent = "JS エラー: " + message + " (" + line + "行目)";
+  };
+  window.onunhandledrejection = function (e) {
+    document.getElementById("footer").textContent = "JS エラー: " + e.reason;
+  };
+
+  var WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+  var WEATHER_INTERVAL_MS = 15 * 60 * 1000;
+  var ROOM_INTERVAL_MS = 5 * 60 * 1000;
+
+  // The device has no Wi-Fi and its clock drifts, so follow the server's clock instead.
+  var clockOffsetMs = 0;
+  function now() { return new Date(Date.now() + clockOffsetMs); }
+
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function hhmm(d) { return d.getHours() + ":" + pad(d.getMinutes()); }
+
+  // Every DOM write repaints the e-ink panel, so skip writes that would not change anything.
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el.textContent !== text) el.textContent = text;
+  }
+  var lastHTML = {};
+  function setHTML(id, html) {
+    if (lastHTML[id] === html) return;
+    lastHTML[id] = html;
+    document.getElementById(id).innerHTML = html;
+  }
+
+  function renderClock() {
+    var d = now();
+    setText("date", (d.getMonth() + 1) + "月" + d.getDate() + "日（" + WEEKDAYS[d.getDay()] + "）");
+    setText("time", hhmm(d));
+  }
+
+  // Tick once per minute on the boundary, refreshing the per-minute panels with the clock so the
+  // e-ink panel repaints once a minute; per-second updates ghost.
+  function minuteTick() {
+    renderClock();
+    loadSystem();
+    loadAgents();
+    setTimeout(minuteTick, 60000 - (now().getTime() % 60000) + 50);
+  }
+
+  function dayName(date, i) {
+    if (i === 0) return "今日";
+    if (i === 1) return "明日";
+    var ymd = date.split("-");
+    return WEEKDAYS[new Date(Date.UTC(+ymd[0], ymd[1] - 1, +ymd[2])).getUTCDay()] + "曜";
+  }
+
+  // getJSON fetches an API and keeps the clock in step with the server's Date header.
+  function getJSON(url) {
+    return fetch(url).then(function (r) {
+      var serverDate = Date.parse(r.headers.get("Date"));
+      if (!isNaN(serverDate)) {
+        clockOffsetMs = serverDate - Date.now();
+        renderClock();
+      }
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+  }
+
+  // load resolves to whether url was fetched and rendered; a failure is shown in errorID instead.
+  function load(url, render, errorID, errorLabel) {
+    return getJSON(url).then(render).then(function () { return true; }, function (e) {
+      delete lastHTML[errorID];
+      setText(errorID, errorLabel + "の取得に失敗: " + e.message);
+      return false;
+    });
+  }
+
+  function renderWeather(w) {
+    setText("now-label", w.now.label);
+    setText("now-temp", Math.round(w.now.temp) + "°");
+    var html = "";
+    w.days.forEach(function (day, i) {
+      html += '<div class="day"><div><span class="name">' + dayName(day.date, i) + '</span> ' + day.label + '</div>' +
+        '<div class="nums">' + Math.round(day.max) + "°/" + Math.round(day.min) + '° ☂' + day.pop + '%</div></div>';
+    });
+    setHTML("days", html);
+    setText("footer", "天気 " + hhmm(now()) + " 更新");
+  }
+
+  function loadWeather() { load("/api/weather", renderWeather, "footer", "天気"); }
+
+  function gb(bytes) { return (bytes / 1e9).toFixed(bytes < 1e11 ? 1 : 0); }
+
+  function uptime(sec) {
+    var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+    return d > 0 ? d + "日" + h + "時間" : h + "時間" + m + "分";
+  }
+
+  function statRow(name, percent, value) {
+    var bar = '<span class="bar"><div class="fill" style="width:' + Math.min(100, Math.max(0, percent)).toFixed(0) + '%"></div></span>';
+    return '<div class="stat"><span class="name">' + name + '</span>' + bar + '<span class="value">' + value + '</span></div>';
+  }
+
+  function renderSystem(s) {
+    setText("pc-title", s.hostname + " · 稼働 " + uptime(s.uptimeSec));
+    var cpu = s.cpuPercent.toFixed(0) + "%" + (s.cpuTempC === null ? "" : " · " + s.cpuTempC.toFixed(0) + "°C");
+    setHTML("pc",
+      statRow("CPU", s.cpuPercent, cpu) +
+      statRow("メモリ", s.memUsed / s.memTotal * 100, gb(s.memUsed) + " / " + gb(s.memTotal) + " GB") +
+      statRow("ディスク", s.diskUsed / s.diskTotal * 100, gb(s.diskUsed) + " / " + gb(s.diskTotal) + " GB"));
+  }
+
+  function renderRoom(room) {
+    var section = document.getElementById("room-section");
+    if (!room.enabled) { section.style.display = "none"; return; }
+    section.style.display = "";
+    var html = "";
+    room.sensors.forEach(function (s) {
+      if (s.offline) return;
+      var values = (s.temperature === null ? "" : s.temperature.toFixed(1) + "° ") +
+        (s.humidity === null ? "" : s.humidity + "%") +
+        (s.co2 === null ? "" : ' <span class="co2">' + s.co2 + "ppm</span>");
+      html += '<div class="sensor"><div class="name">' + escapeHTML(s.name) + '</div>' +
+        '<div class="values">' + values + '</div></div>';
+    });
+    setHTML("room", html || '<div class="sensor">センサーが見つからない</div>');
+  }
+
+  function loadRoom() {
+    load("/api/room", renderRoom, "room", "部屋の情報").then(function (ok) {
+      if (!ok) document.getElementById("room-section").style.display = "";
+    });
+  }
+
+  var MAX_AGENT_ROWS = 6;
+  var WAITING_LABELS = {
+    "permission prompt": "許可待ち",
+    "input needed": "入力待ち",
+    "dialog open": "選択待ち",
+    "goal proposal": "ゴール確認"
+  };
+
+  function ago(sec) {
+    if (sec < 60) return "今";
+    if (sec < 3600) return Math.floor(sec / 60) + "分";
+    if (sec < 86400) return Math.floor(sec / 3600) + "時間";
+    return Math.floor(sec / 86400) + "日";
+  }
+
+  function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function renderAgents(agents) {
+    var busy = agents.filter(function (a) { return a.status === "busy"; }).length;
+    var todo = agents.filter(function (a) { return a.attention; });
+    setText("agents-title", "Agents · 要対応 " + todo.length + " · 実行中 " + busy + " / " + agents.length);
+    var html = "";
+    todo.slice(0, MAX_AGENT_ROWS).forEach(function (a) {
+      var isWaiting = a.attention === "waiting";
+      var label = a.name || a.project;
+      var tag = isWaiting ? '<span class="tag">' + escapeHTML(WAITING_LABELS[a.waitingFor] || "待機中") + '</span>' : "";
+      var activity = isWaiting && a.tool ? a.tool : (a.lastPrompt ? "「" + a.lastPrompt + "」" : "");
+      html += '<div class="agent' + (isWaiting ? " waiting" : "") + '">' +
+        '<div class="row"><span class="mark">' + (isWaiting ? "!" : "○") + '</span>' +
+        '<span class="name">' + escapeHTML(a.title || label) + '</span>' +
+        '<span class="since">' + ago(a.sinceSec) + '</span></div>' +
+        '<div class="detail">' + tag + escapeHTML(a.title ? label + (activity ? " · " + activity : "") : activity) + '</div></div>';
+    });
+    if (todo.length > MAX_AGENT_ROWS) {
+      html += '<div class="agent"><div class="row"><span class="mark"></span><span class="name">ほか ' + (todo.length - MAX_AGENT_ROWS) + ' 件</span></div></div>';
+    }
+    if (todo.length === 0) html = '<div class="agent none">対応が必要なものはない</div>';
+    setHTML("agents", html);
+  }
+
+  function loadAgents() { load("/api/agents", renderAgents, "agents", "Agent 情報"); }
+  function loadSystem() { load("/api/system", renderSystem, "pc", "PC 情報"); }
+
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+
+  // Fullscreen needs a user gesture; a tap anywhere hides Chrome's URL bar.
+  document.addEventListener("click", function () {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  });
+
+  minuteTick();
+  loadWeather();
+  loadRoom();
+  setInterval(loadRoom, ROOM_INTERVAL_MS);
+  setInterval(loadWeather, WEATHER_INTERVAL_MS);
+</script>
+</body>
+</html>

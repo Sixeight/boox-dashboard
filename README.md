@@ -2,6 +2,8 @@
 
 An always-on e-ink dashboard for a [Boox Palma](https://shop.boox.com/products/palma), served from a Linux PC over USB.
 
+<img src="docs/screenshot.png" alt="The dashboard on a Boox Palma" width="320">
+
 The page shows:
 
 - The clock and date
